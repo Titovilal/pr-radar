@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "PR Radar",
+  "description": "Avisos de GitHub que importan: reviews pendientes, estado de tus PRs y menciones.",
+  "version": "0.1.0",
+  "icons": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "action": {
+    "default_popup": "popup/index.html",
+    "default_icon": { "16": "icons/16.png", "32": "icons/32.png" }
+  },
+  "options_ui": { "page": "options/index.html", "open_in_tab": true },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": ["storage", "alarms", "notifications"],
+  "host_permissions": ["https://api.github.com/*"]
+}
