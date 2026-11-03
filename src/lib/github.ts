@@ -82,6 +82,7 @@ export async function fetchViews(
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ query: params.length ? query : "query { viewer { login } }", variables }),
+    signal: AbortSignal.timeout(20_000),
   });
   const body = (await res.json().catch(() => ({}))) as GraphQLResponse;
 

@@ -1,7 +1,7 @@
 import { useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { fetchViews } from "../lib/github";
 import { ArrowDownIcon, ArrowUpIcon, TrashIcon } from "../lib/icons";
-import { DEFAULT_VIEWS, save } from "../lib/storage";
+import { DEFAULT_VIEWS, load, save } from "../lib/storage";
 import type { NotifyMode, Settings, View } from "../lib/types";
 import { useStored } from "../lib/useStored";
 
@@ -21,21 +21,28 @@ const EXAMPLES: { label: string; query: string }[] = [
   { label: "Issues asignadas a mí", query: "is:issue is:open assignee:@me archived:false" },
 ];
 
+const STATUS_TONES = { ok: "text-emerald-600", error: "text-rose-600", pending: "text-zinc-500" } as const;
+
 const input =
   "w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950";
 
 export function Options() {
   const stored = useStored("settings");
+  // Last saved settings; compared against the draft to know if there are unsaved changes.
+  const [baseline, setBaseline] = useState<Settings>();
   const [draft, setDraft] = useState<Settings>();
-  const [status, setStatus] = useState<{ tone: "ok" | "error"; text: string }>();
+  const [status, setStatus] = useState<{ tone: "ok" | "error" | "pending"; text: string }>();
 
   useEffect(() => {
-    if (stored && !draft) setDraft(stored);
+    if (stored && !draft) {
+      setDraft(stored);
+      setBaseline(stored);
+    }
   }, [stored, draft]);
 
   if (!draft) return null;
 
-  const dirty = JSON.stringify(draft) !== JSON.stringify(stored);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   const update = (patch: Partial<Settings>) => setDraft({ ...draft, ...patch });
   const updateView = (index: number, patch: Partial<View>) =>
     update({ views: draft.views.map((v, i) => (i === index ? { ...v, ...patch } : v)) });
@@ -57,10 +64,29 @@ export function Options() {
   };
 
   const persist = async () => {
-    const views = draft.views.filter((v) => v.query.trim());
-    await save("settings", { ...draft, token: draft.token.trim(), views });
-    setDraft({ ...draft, token: draft.token.trim(), views });
-    setStatus({ tone: "ok", text: "Guardado. Actualizando…" });
+    const next = { ...draft, token: draft.token.trim(), views: draft.views.filter((v) => v.query.trim()) };
+    await save("settings", next);
+    setDraft(next);
+    setBaseline(next);
+    setStatus({ tone: "pending", text: "Guardado. Actualizando…" });
+
+    const done = chrome.runtime.sendMessage({ type: "poll" }).then(() => true, () => false);
+    const timeout = new Promise<false>((resolve) => setTimeout(() => resolve(false), 30_000));
+    if (!(await Promise.race([done, timeout]))) {
+      setStatus({
+        tone: "error",
+        text: "El servicio en segundo plano no responde. Recarga la extensión y mira si muestra errores.",
+      });
+      return;
+    }
+
+    const snapshot = await load("snapshot");
+    if (snapshot?.error === "no-token") setStatus({ tone: "error", text: "Falta el token" });
+    else if (snapshot?.error) setStatus({ tone: "error", text: `No se pudo actualizar: ${snapshot.error}` });
+    else {
+      const total = Object.values(snapshot?.results ?? {}).reduce((sum, r) => sum + r.items.length, 0);
+      setStatus({ tone: "ok", text: `Listo · @${snapshot?.login} · ${total} elementos en tus vistas` });
+    }
   };
 
   return (
@@ -221,11 +247,11 @@ export function Options() {
       <div className="fixed inset-x-0 bottom-0 border-t border-zinc-200 bg-white/90 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90">
         <div className="mx-auto flex max-w-3xl items-center gap-3 px-4 py-3 sm:px-6">
           {status && (
-            <p className={`text-sm ${status.tone === "ok" ? "text-emerald-600" : "text-rose-600"}`}>{status.text}</p>
+            <p className={`text-sm ${STATUS_TONES[status.tone]}`}>{status.text}</p>
           )}
           <div className="flex-1" />
           {dirty && (
-            <Button variant="secondary" onClick={() => setDraft(stored)}>
+            <Button variant="secondary" onClick={() => setDraft(baseline)}>
               Descartar
             </Button>
           )}
