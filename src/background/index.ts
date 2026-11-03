@@ -181,7 +181,7 @@ async function updateBadge(): Promise<void> {
 
   const count = settings.views
     .filter((view) => view.badge)
-    .reduce((sum, view) => sum + visibleItems(snapshot?.results[view.id]?.items ?? [], dismissed).length, 0);
+    .reduce((sum, view) => sum + visibleItems(snapshot?.results[view.id]?.items ?? [], dismissed, settings.repos).length, 0);
   await chrome.action.setBadgeBackgroundColor({ color: "#e11d48" });
   await chrome.action.setBadgeText({ text: count ? String(count) : "" });
 }

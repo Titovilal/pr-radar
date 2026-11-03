@@ -10,7 +10,7 @@ import {
 } from "../lib/icons";
 import { mentionPattern } from "../lib/mentions";
 import { chips, MENTION_PLACES, REVIEW_TONES, REVIEW_VERBS, timeAgo, type Tone } from "../lib/status";
-import { save, signature, visibleItems } from "../lib/storage";
+import { inRepos, save, signature, visibleItems } from "../lib/storage";
 import type { Dismissed, Item, Mention, Review } from "../lib/types";
 import { useStored } from "../lib/useStored";
 
@@ -66,7 +66,7 @@ export function Popup() {
   const views = settings.views;
   const active = views.find((v) => v.id === tab) ?? views[0];
   const result = active ? snapshot?.results[active.id] : undefined;
-  const all = result?.items ?? [];
+  const all = inRepos(result?.items ?? [], settings.repos);
   const visible = visibleItems(all, dismissed);
   const hiddenCount = all.length - visible.length;
   const shown = showHidden ? all : visible;
@@ -116,7 +116,7 @@ export function Popup() {
 
       <nav className="mx-3 mb-1 flex gap-0.5 rounded-lg bg-zinc-100 p-0.5 dark:bg-zinc-800/80" role="tablist">
         {views.map((view) => {
-          const count = visibleItems(snapshot?.results[view.id]?.items ?? [], dismissed).length;
+          const count = visibleItems(snapshot?.results[view.id]?.items ?? [], dismissed, settings.repos).length;
           const selected = view.id === active?.id;
           return (
             <button

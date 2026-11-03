@@ -130,6 +130,13 @@ export function effectiveQuery(query: string, repos: string[]): string {
   return scoped.length <= MAX_QUERY_LENGTH ? scoped : query;
 }
 
-export function visibleItems(items: Item[], dismissed: Dismissed): Item[] {
-  return items.filter((item) => dismissed[item.id] !== signature(item));
+/** Items from the chosen repos (if any) that aren't dismissed; also guards against snapshots taken before the repo selection changed. */
+export function visibleItems(items: Item[], dismissed: Dismissed, repos: string[] = []): Item[] {
+  return inRepos(items, repos).filter((item) => dismissed[item.id] !== signature(item));
+}
+
+export function inRepos(items: Item[], repos: string[]): Item[] {
+  if (repos.length === 0) return items;
+  const allowed = new Set(repos.map((r) => r.toLowerCase()));
+  return items.filter((item) => allowed.has(item.repo.toLowerCase()));
 }
