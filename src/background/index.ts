@@ -1,6 +1,14 @@
 import { fetchViews, GitHubError } from "../lib/github";
-import { describe } from "../lib/status";
-import { load, save, signature, visibleItems } from "../lib/storage";
+import { ciMessage, MENTION_PLACES, REVIEW_VERBS } from "../lib/status";
+import {
+  DEFAULT_CHANGE_TRIGGERS,
+  effectiveQuery,
+  load,
+  parseSignature,
+  save,
+  signature,
+  visibleItems,
+} from "../lib/storage";
 import type { Item, Seen, Snapshot, View } from "../lib/types";
 
 const ALARM = "poll";
@@ -28,7 +36,7 @@ async function runPoll(): Promise<void> {
 
   let snapshot: Snapshot;
   try {
-    const { login, results } = await fetchViews(settings.token, settings.views);
+    const { login, results } = await fetchViews(settings.token, settings.views, settings.repos);
     snapshot = { fetchedAt: Date.now(), login, results };
   } catch (err) {
     const message = err instanceof GitHubError || err instanceof Error ? err.message : String(err);
@@ -47,8 +55,9 @@ async function runPoll(): Promise<void> {
   const nextSeen: Seen = {};
   for (const view of settings.views) {
     const items = snapshot.results[view.id]?.items ?? [];
-    const before = seen[view.query];
-    nextSeen[view.query] = Object.fromEntries(items.map((item) => [item.id, signature(item)]));
+    const key = effectiveQuery(view.query, settings.repos);
+    const before = seen[key];
+    nextSeen[key] = Object.fromEntries(items.map((item) => [item.id, signature(item)]));
     // First time we see this query: seed silently instead of flooding notifications.
     if (before) notifyView(view, items, before);
   }
@@ -62,36 +71,93 @@ async function runPoll(): Promise<void> {
   await updateBadge();
 }
 
+interface Alert {
+  id: string;
+  title: string;
+  message: string;
+  contextMessage?: string;
+}
+
+function ref(item: Item): string {
+  return `${item.repo}#${item.number}`;
+}
+
+/** What, if anything, is worth telling the user about this item since the last poll. */
+function alertFor(view: View, item: Item, beforeSig: string | undefined): Alert | null {
+  const isNew = beforeSig === undefined;
+  const prev = parseSignature(beforeSig);
+  const mentionChanged = item.mention && prev && prev.mention !== item.mention.url;
+
+  if (item.mention && (isNew || mentionChanged)) {
+    return {
+      id: item.mention.url,
+      title: `@${item.mention.author} te ha mencionado ${MENTION_PLACES[item.mention.place]}`,
+      message: item.mention.excerpt,
+      contextMessage: `${ref(item)} · ${item.title}`,
+    };
+  }
+
+  if (view.notify === "new") {
+    if (!isNew) return null;
+    // Mention view item where the mention isn't explicit (usually a team mention).
+    if (item.mention === null) {
+      return { id: item.url, title: "Te han mencionado", message: item.title, contextMessage: ref(item) };
+    }
+    if (item.myReviewAt) {
+      return { id: item.url, title: "🔁 Te vuelven a pedir review", message: item.title, contextMessage: ref(item) };
+    }
+    return { id: item.url, title: `👀 ${item.author} te pide review`, message: item.title, contextMessage: ref(item) };
+  }
+
+  // "change" mode: only items we already knew, with a readable previous signature.
+  if (!prev) return null;
+  const on = view.changeOn ?? DEFAULT_CHANGE_TRIGGERS;
+
+  if (on.reviews && item.lastReview && prev.review !== item.lastReview.id) {
+    return {
+      id: item.lastReview.url,
+      title: `${item.lastReview.author} ${REVIEW_VERBS[item.lastReview.state]} tu PR`,
+      message: item.title,
+      contextMessage: ref(item),
+    };
+  }
+  if (on.ci && prev.ci !== item.ci) {
+    const message = ciMessage(item);
+    if (message) return { id: item.url, title: message, message: item.title, contextMessage: ref(item) };
+  }
+  if (on.commits && prev.sha && item.headSha && prev.sha !== item.headSha) {
+    return {
+      id: item.url,
+      title: "📝 Han subido cambios a una PR que revisaste",
+      message: item.title,
+      contextMessage: ref(item),
+    };
+  }
+  return null;
+}
+
 function notifyView(view: View, items: Item[], before: Record<string, string>): void {
   if (view.notify === "off") return;
 
-  const fresh =
-    view.notify === "new"
-      ? items.filter((item) => !(item.id in before))
-      : items.filter((item) => item.id in before && before[item.id] !== signature(item));
-  if (fresh.length === 0) return;
+  const alerts = items.map((item) => alertFor(view, item, before[item.id])).filter((a) => a !== null);
+  if (alerts.length === 0) return;
 
-  if (fresh.length > MAX_INDIVIDUAL) {
-    notify(`summary:${view.id}`, {
-      title: `${view.name}: ${fresh.length} novedades`,
-      message: fresh
+  if (alerts.length > MAX_INDIVIDUAL) {
+    notify({
+      id: `summary:${view.id}`,
+      title: `${view.name}: ${alerts.length} novedades`,
+      message: alerts
         .slice(0, 4)
-        .map((i) => `• ${i.title}`)
+        .map((a) => `• ${a.title}`)
         .join("\n"),
     });
     return;
   }
 
-  for (const item of fresh) {
-    notify(item.url, {
-      title: view.notify === "new" ? `${view.name} · ${item.repo}#${item.number}` : describe(item),
-      message: item.title,
-      contextMessage: view.notify === "new" ? `de ${item.author}` : `${item.repo}#${item.number}`,
-    });
-  }
+  for (const alert of alerts) notify(alert);
 }
 
-function notify(id: string, opts: { title: string; message: string; contextMessage?: string }): void {
+function notify({ id, ...opts }: Alert): void {
   void chrome.notifications.create(id, {
     type: "basic",
     iconUrl: chrome.runtime.getURL("icons/128.png"),

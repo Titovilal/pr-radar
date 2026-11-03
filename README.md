@@ -1,12 +1,13 @@
 # PR Radar
 
-Extensión de navegador (Chrome, Edge, Brave… cualquier Chromium) que te avisa de lo que de verdad importa en GitHub:
+Extensión de navegador (Chrome, Brave, Edge… cualquier Chromium) que te avisa solo de lo que tiene que ver contigo en GitHub, y solo en los repos que elijas:
 
-- **Reviews**: alguien te pide revisión. Si ya revisaste y te la vuelven a pedir, vuelve a avisar.
-- **Mis PRs**: avisa cuando cambia el estado de review (aprobada, cambios pedidos) o el CI (en verde, fallando).
-- **Menciones**: issues y PRs abiertas donde te mencionan.
+- **Para revisar**: te piden review. Si ya la revisaste y te la vuelven a pedir, lo marca como tal.
+- **Mis PRs**: tus PRs abiertas. Avisa cuando alguien hace review (quién y qué: aprobada, cambios pedidos, comentario) o cuando el CI pasa a verde o falla.
+- **Revisadas**: PRs que ya revisaste. Avisa cuando suben commits nuevos.
+- **Menciones**: dónde te mencionan, quién y el trozo exacto del comentario, con enlace directo a él.
 
-Cada vista es una búsqueda normal de GitHub, así que puedes editarlas, añadir las tuyas y decidir cuáles avisan y cuáles cuentan en el icono.
+Cada pestaña es una búsqueda de GitHub editable, y puedes añadir las tuyas. Los ajustes se guardan solos.
 
 ## Instalación (desde el código)
 

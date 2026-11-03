@@ -1,4 +1,4 @@
-import type { Item } from "./types";
+import type { Item, MentionPlace, ReviewState } from "./types";
 
 export type Tone = "green" | "red" | "amber" | "gray" | "blue";
 
@@ -7,27 +7,53 @@ export interface Chip {
   tone: Tone;
 }
 
-export function chips(item: Item): Chip[] {
-  if (item.kind === "issue") return [{ label: "Issue", tone: "gray" }];
+/** New commits landed after the viewer's last review. */
+export function hasChangesSinceMyReview(item: Item): boolean {
+  return Boolean(item.myReviewAt && item.headCommittedAt && item.headCommittedAt > item.myReviewAt);
+}
+
+export function chips(item: Item, viewId: string): Chip[] {
+  if (item.kind === "issue") return [];
   const out: Chip[] = [];
+  if (viewId === "review" && item.myReviewAt) out.push({ label: "Te la vuelven a pedir", tone: "blue" });
+  if (hasChangesSinceMyReview(item) && viewId !== "mine")
+    out.push({ label: "Cambios desde tu review", tone: "blue" });
   if (item.isDraft) out.push({ label: "Draft", tone: "gray" });
   if (item.reviewDecision === "APPROVED") out.push({ label: "Aprobada", tone: "green" });
   if (item.reviewDecision === "CHANGES_REQUESTED") out.push({ label: "Cambios pedidos", tone: "amber" });
-  if (item.reviewDecision === "REVIEW_REQUIRED") out.push({ label: "Sin review", tone: "blue" });
   if (item.ci === "SUCCESS") out.push({ label: "CI ✓", tone: "green" });
   if (item.ci === "FAILURE" || item.ci === "ERROR") out.push({ label: "CI ✗", tone: "red" });
   if (item.ci === "PENDING" || item.ci === "EXPECTED") out.push({ label: "CI …", tone: "gray" });
   return out;
 }
 
-/** One-line summary of the state, used in change notifications. */
-export function describe(item: Item): string {
+export const REVIEW_VERBS: Record<ReviewState, string> = {
+  APPROVED: "ha aprobado",
+  CHANGES_REQUESTED: "ha pedido cambios en",
+  COMMENTED: "ha comentado",
+  DISMISSED: "ha descartado su review de",
+  PENDING: "está revisando",
+};
+
+export const REVIEW_TONES: Record<ReviewState, Tone> = {
+  APPROVED: "green",
+  CHANGES_REQUESTED: "amber",
+  COMMENTED: "gray",
+  DISMISSED: "gray",
+  PENDING: "gray",
+};
+
+export const MENTION_PLACES: Record<MentionPlace, string> = {
+  description: "en la descripción",
+  comment: "en un comentario",
+  review: "en una review",
+  code: "en un comentario de código",
+};
+
+export function ciMessage(item: Item): string | null {
   if (item.ci === "FAILURE" || item.ci === "ERROR") return "❌ El CI ha fallado";
-  if (item.reviewDecision === "CHANGES_REQUESTED") return "✋ Te han pedido cambios";
-  if (item.reviewDecision === "APPROVED" && item.ci === "SUCCESS") return "🚀 Aprobada y en verde";
-  if (item.reviewDecision === "APPROVED") return "✅ Aprobada";
-  if (item.ci === "SUCCESS") return "🟢 CI en verde";
-  return "Ha cambiado de estado";
+  if (item.ci === "SUCCESS") return item.reviewDecision === "APPROVED" ? "🚀 Aprobada y en verde" : "🟢 CI en verde";
+  return null;
 }
 
 export function timeAgo(iso: string | number, now = Date.now()): string {

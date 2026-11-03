@@ -1,22 +1,29 @@
-import type { CiState, Item, ReviewDecision, View, ViewResult } from "./types";
+import { findMention, type MentionCandidate } from "./mentions";
+import { effectiveQuery } from "./storage";
+import type { CiState, Item, Review, ReviewDecision, ReviewState, View, ViewResult } from "./types";
 
 const ENDPOINT = "https://api.github.com/graphql";
 
-const FIELDS = `
-  nodes {
+const AUTHOR = "author { login avatarUrl }";
+const BASE = `id number title url updatedAt createdAt body repository { nameWithOwner } ${AUTHOR}`;
+const PR = `isDraft reviewDecision headRefName baseRefName
+  commits(last: 1) { nodes { commit { oid committedDate statusCheckRollup { state } } } }
+  recentReviews: reviews(last: 20) { nodes { id state url submittedAt ${AUTHOR} } }`;
+const COMMENT = `body url createdAt ${AUTHOR}`;
+const COMMENTS = `comments(last: 30) { nodes { ${COMMENT} } }`;
+const REVIEW_BODIES = `mentionReviews: reviews(last: 10) { nodes { ${COMMENT} comments(last: 10) { nodes { ${COMMENT} path } } } }`;
+
+function fields(withMentions: boolean): string {
+  return `nodes {
     __typename
-    ... on PullRequest {
-      id number title url updatedAt isDraft reviewDecision
-      repository { nameWithOwner }
-      author { login avatarUrl }
-      commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-    }
-    ... on Issue {
-      id number title url updatedAt
-      repository { nameWithOwner }
-      author { login avatarUrl }
-    }
+    ... on PullRequest { ${BASE} ${PR} ${withMentions ? `${COMMENTS} ${REVIEW_BODIES}` : ""} }
+    ... on Issue { ${BASE} ${withMentions ? COMMENTS : ""} }
   }`;
+}
+
+export function isMentionView(view: View): boolean {
+  return /\bmentions:/i.test(view.query);
+}
 
 export class GitHubError extends Error {
   readonly status?: number;
@@ -27,6 +34,27 @@ export class GitHubError extends Error {
   }
 }
 
+interface RawAuthor {
+  login: string;
+  avatarUrl: string;
+}
+
+interface RawComment {
+  body: string;
+  url: string;
+  createdAt: string;
+  author: RawAuthor | null;
+  path?: string;
+}
+
+interface RawReview {
+  id: string;
+  state: ReviewState;
+  url: string;
+  submittedAt: string | null;
+  author: RawAuthor | null;
+}
+
 interface RawNode {
   __typename: string;
   id: string;
@@ -34,23 +62,64 @@ interface RawNode {
   title: string;
   url: string;
   updatedAt: string;
+  createdAt: string;
+  body: string;
   isDraft?: boolean;
   reviewDecision?: ReviewDecision;
+  headRefName?: string;
+  baseRefName?: string;
   repository: { nameWithOwner: string };
-  author: { login: string; avatarUrl: string } | null;
-  commits?: { nodes: { commit: { statusCheckRollup: { state: CiState } | null } }[] };
+  author: RawAuthor | null;
+  commits?: {
+    nodes: { commit: { oid: string; committedDate: string; statusCheckRollup: { state: CiState } | null } }[];
+  };
+  recentReviews?: { nodes: RawReview[] };
+  comments?: { nodes: RawComment[] };
+  mentionReviews?: { nodes: (RawComment & { comments: { nodes: RawComment[] } })[] };
 }
 
 interface GraphQLResponse {
-  data?: Record<string, { nodes: RawNode[] } | { login: string } | null>;
+  data?: Record<string, unknown>;
   errors?: { message: string; path?: string[] }[];
   message?: string;
 }
 
-function toItem(node: RawNode): Item {
+function mentionCandidates(node: RawNode): MentionCandidate[] {
+  const out: MentionCandidate[] = [{ ...node, place: "description" }];
+  for (const c of node.comments?.nodes ?? []) out.push({ ...c, place: "comment" });
+  for (const review of node.mentionReviews?.nodes ?? []) {
+    out.push({ ...review, place: "review" });
+    for (const c of review.comments.nodes) out.push({ ...c, place: "code" });
+  }
+  return out;
+}
+
+function reviewInfo(node: RawNode, login: string): Pick<Item, "lastReview" | "myReviewAt"> {
+  const reviews = (node.recentReviews?.nodes ?? []).filter((r) => r.submittedAt && r.state !== "PENDING");
+  const me = login.toLowerCase();
+  const mine = reviews.filter((r) => r.author?.login.toLowerCase() === me);
+  // Self-reviews on your own PR (replies to threads) aren't "someone reviewed my PR".
+  const others = reviews.filter((r) => r.author && r.author.login.toLowerCase() !== me);
+  const last = others.at(-1);
+  const lastReview: Review | null = last
+    ? {
+        id: last.id,
+        author: last.author!.login,
+        authorAvatar: last.author!.avatarUrl,
+        state: last.state,
+        submittedAt: last.submittedAt!,
+        url: last.url,
+      }
+    : null;
+  return { lastReview, myReviewAt: mine.at(-1)?.submittedAt ?? null };
+}
+
+function toItem(node: RawNode, login: string, withMentions: boolean): Item {
+  const isPr = node.__typename === "PullRequest";
+  const head = node.commits?.nodes[0]?.commit;
   return {
     id: node.id,
-    kind: node.__typename === "PullRequest" ? "pr" : "issue",
+    kind: isPr ? "pr" : "issue",
     number: node.number,
     title: node.title,
     url: node.url,
@@ -60,55 +129,109 @@ function toItem(node: RawNode): Item {
     updatedAt: node.updatedAt,
     isDraft: node.isDraft ?? false,
     reviewDecision: node.reviewDecision ?? null,
-    ci: node.commits?.nodes[0]?.commit.statusCheckRollup?.state ?? null,
+    ci: head?.statusCheckRollup?.state ?? null,
+    headRef: node.headRefName,
+    baseRef: node.baseRefName,
+    headSha: head?.oid,
+    headCommittedAt: head?.committedDate,
+    ...(isPr ? reviewInfo(node, login) : {}),
+    mention: withMentions ? findMention(mentionCandidates(node), login) : undefined,
   };
 }
 
-/** Runs every view's search in a single GraphQL request (one alias per view). */
-export async function fetchViews(
-  token: string,
-  views: View[],
-): Promise<{ login: string; results: Record<string, ViewResult> }> {
-  const variables: Record<string, string> = {};
-  const params: string[] = [];
-  const selections = views.map((view, i) => {
-    variables[`q${i}`] = view.query;
-    params.push(`$q${i}: String!`);
-    return `v${i}: search(query: $q${i}, type: ISSUE, first: 50) { ${FIELDS} }`;
-  });
-  const query = `query(${params.join(", ")}) { viewer { login } ${selections.join("\n")} }`;
-
+async function graphql(token: string, query: string, variables: Record<string, unknown>): Promise<GraphQLResponse> {
   const res = await fetch(ENDPOINT, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ query: params.length ? query : "query { viewer { login } }", variables }),
+    body: JSON.stringify({ query, variables }),
     signal: AbortSignal.timeout(20_000),
   });
   const body = (await res.json().catch(() => ({}))) as GraphQLResponse;
-
   if (!res.ok) {
     const message =
       res.status === 401 ? "Token inválido o caducado" : (body.message ?? `GitHub respondió ${res.status}`);
     throw new GitHubError(message, res.status);
   }
   if (!body.data) throw new GitHubError(body.errors?.[0]?.message ?? "Respuesta vacía de GitHub");
+  return body;
+}
+
+/** Runs every view's search in a single GraphQL request (one alias per view). */
+export async function fetchViews(
+  token: string,
+  views: View[],
+  repos: string[] = [],
+): Promise<{ login: string; results: Record<string, ViewResult> }> {
+  const variables: Record<string, string> = {};
+  const params: string[] = [];
+  const selections = views.map((view, i) => {
+    const query = effectiveQuery(view.query, repos);
+    // When the repo qualifiers don't fit in the query we filter afterwards, so ask for more.
+    const first = repos.length && query === view.query ? 100 : 50;
+    variables[`q${i}`] = query;
+    params.push(`$q${i}: String!`);
+    return `v${i}: search(query: $q${i}, type: ISSUE, first: ${first}) { ${fields(isMentionView(view))} }`;
+  });
+  const query = params.length
+    ? `query(${params.join(", ")}) { viewer { login } ${selections.join("\n")} }`
+    : "query { viewer { login } }";
+  const body = await graphql(token, query, variables);
 
   const errorsByAlias = new Map<string, string>();
   for (const err of body.errors ?? []) {
     if (err.path?.[0]) errorsByAlias.set(err.path[0], err.message);
   }
 
+  const login = (body.data?.viewer as { login: string } | null)?.login ?? "";
+  const allowed = new Set(repos.map((r) => r.toLowerCase()));
   const results: Record<string, ViewResult> = {};
   views.forEach((view, i) => {
     const alias = `v${i}`;
     const search = body.data?.[alias] as { nodes: RawNode[] } | null | undefined;
-    results[view.id] = {
+    const items = (search?.nodes ?? [])
       // Search nodes can be empty objects for types outside the fragments (e.g. discussions).
-      items: (search?.nodes ?? []).filter((n) => n?.id).map(toItem),
-      error: errorsByAlias.get(alias),
-    };
+      .filter((n) => n?.id)
+      .filter((n) => allowed.size === 0 || allowed.has(n.repository.nameWithOwner.toLowerCase()))
+      .map((n) => toItem(n, login, isMentionView(view)));
+    results[view.id] = { items, error: errorsByAlias.get(alias) };
   });
 
-  const viewer = body.data.viewer as { login: string } | null;
-  return { login: viewer?.login ?? "", results };
+  return { login, results };
+}
+
+export interface RepoOption {
+  name: string;
+  pushedAt: string;
+  isPrivate: boolean;
+}
+
+/** Repos the token can see, most recently pushed first. */
+export async function fetchRepos(token: string): Promise<RepoOption[]> {
+  const query = `query($after: String) {
+    viewer {
+      repositories(first: 100, after: $after, isArchived: false,
+        affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
+        orderBy: { field: PUSHED_AT, direction: DESC }) {
+        pageInfo { hasNextPage endCursor }
+        nodes { nameWithOwner pushedAt isPrivate }
+      }
+    }
+  }`;
+  type Page = {
+    repositories: {
+      pageInfo: { hasNextPage: boolean; endCursor: string };
+      nodes: { nameWithOwner: string; pushedAt: string; isPrivate: boolean }[];
+    };
+  };
+  const repos: RepoOption[] = [];
+  let after: string | null = null;
+  // Three pages (300 repos) is plenty for a picker sorted by activity.
+  for (let page = 0; page < 3; page++) {
+    const body = await graphql(token, query, { after });
+    const conn = (body.data?.viewer as Page).repositories;
+    repos.push(...conn.nodes.map((n) => ({ name: n.nameWithOwner, pushedAt: n.pushedAt, isPrivate: n.isPrivate })));
+    if (!conn.pageInfo.hasNextPage) break;
+    after = conn.pageInfo.endCursor;
+  }
+  return repos;
 }
