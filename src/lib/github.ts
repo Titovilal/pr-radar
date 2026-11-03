@@ -205,33 +205,59 @@ export interface RepoOption {
   isPrivate: boolean;
 }
 
-/** Repos the token can see, most recently pushed first. */
+interface RawRepo {
+  nameWithOwner: string;
+  pushedAt: string;
+  isPrivate: boolean;
+  isArchived: boolean;
+}
+
+const REPO = "nameWithOwner pushedAt isPrivate isArchived";
+const REPO_ORDER = "orderBy: { field: PUSHED_AT, direction: DESC }";
+
+function mergeRepos(raw: (RawRepo | null | undefined)[]): RepoOption[] {
+  const byName = new Map<string, RepoOption>();
+  for (const r of raw) {
+    if (!r || r.isArchived || byName.has(r.nameWithOwner.toLowerCase())) continue;
+    byName.set(r.nameWithOwner.toLowerCase(), { name: r.nameWithOwner, pushedAt: r.pushedAt, isPrivate: r.isPrivate });
+  }
+  return [...byName.values()].sort((a, b) => b.pushedAt.localeCompare(a.pushedAt));
+}
+
+/**
+ * Repos the token can see, most recently pushed first. `viewer.repositories` alone skips repos
+ * reached through org teams, so we also merge each org's repos and the ones the viewer contributed to.
+ */
 export async function fetchRepos(token: string): Promise<RepoOption[]> {
-  const query = `query($after: String) {
+  const query = `query {
     viewer {
-      repositories(first: 100, after: $after, isArchived: false,
-        affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
-        orderBy: { field: PUSHED_AT, direction: DESC }) {
-        pageInfo { hasNextPage endCursor }
-        nodes { nameWithOwner pushedAt isPrivate }
+      repositories(first: 100, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], ${REPO_ORDER}) {
+        nodes { ${REPO} }
+      }
+      repositoriesContributedTo(first: 100, includeUserRepositories: true, ${REPO_ORDER}) { nodes { ${REPO} } }
+      organizations(first: 20) {
+        nodes { repositories(first: 100, ${REPO_ORDER}) { nodes { ${REPO} } } }
       }
     }
   }`;
-  type Page = {
-    repositories: {
-      pageInfo: { hasNextPage: boolean; endCursor: string };
-      nodes: { nameWithOwner: string; pushedAt: string; isPrivate: boolean }[];
-    };
+  type Conn = { nodes: (RawRepo | null)[] } | null;
+  const body = await graphql(token, query, {});
+  const viewer = body.data?.viewer as {
+    repositories: Conn;
+    repositoriesContributedTo: Conn;
+    // An org can come back null when it restricts third-party access for this token.
+    organizations: { nodes: ({ repositories: Conn } | null)[] } | null;
   };
-  const repos: RepoOption[] = [];
-  let after: string | null = null;
-  // Three pages (300 repos) is plenty for a picker sorted by activity.
-  for (let page = 0; page < 3; page++) {
-    const body = await graphql(token, query, { after });
-    const conn = (body.data?.viewer as Page).repositories;
-    repos.push(...conn.nodes.map((n) => ({ name: n.nameWithOwner, pushedAt: n.pushedAt, isPrivate: n.isPrivate })));
-    if (!conn.pageInfo.hasNextPage) break;
-    after = conn.pageInfo.endCursor;
-  }
-  return repos;
+  return mergeRepos([
+    ...(viewer.repositories?.nodes ?? []),
+    ...(viewer.repositoriesContributedTo?.nodes ?? []),
+    ...(viewer.organizations?.nodes ?? []).flatMap((org) => org?.repositories?.nodes ?? []),
+  ]);
+}
+
+/** Live repo search by name, for repos missing from `fetchRepos`. */
+export async function searchRepos(token: string, text: string): Promise<RepoOption[]> {
+  const query = `query($q: String!) { search(query: $q, type: REPOSITORY, first: 20) { nodes { ... on Repository { ${REPO} } } } }`;
+  const body = await graphql(token, query, { q: `${text} in:name archived:false` });
+  return mergeRepos((body.data?.search as { nodes: RawRepo[] } | null)?.nodes ?? []);
 }

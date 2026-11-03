@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { fetchRepos, fetchViews, type RepoOption } from "../lib/github";
+import { fetchRepos, fetchViews, searchRepos, type RepoOption } from "../lib/github";
 import { CheckIcon, LockIcon, SearchIcon, TrashIcon, XIcon } from "../lib/icons";
 import { timeAgo } from "../lib/status";
 import { DEFAULT_CHANGE_TRIGGERS, DEFAULT_SETTINGS, DEFAULT_VIEWS, save } from "../lib/storage";
@@ -240,11 +240,32 @@ function ReposCard({
     onChange(selected.has(name.toLowerCase()) ? repos.filter((r) => r.toLowerCase() !== name.toLowerCase()) : [...repos, name]);
 
   const q = filter.trim().toLowerCase();
-  const filtered = useMemo(
-    () => (options ?? []).filter((r) => !q || r.name.toLowerCase().includes(q)),
-    [options, q],
-  );
-  const manual = /^[\w.-]+\/[\w.-]+$/.test(filter.trim()) && !options?.some((r) => r.name.toLowerCase() === q);
+  const [remote, setRemote] = useState<RepoOption[]>([]);
+
+  // Ask GitHub too while typing: some repos the user can reach never show up in the listings.
+  useEffect(() => {
+    setRemote([]);
+    if (!token || q.length < 2) return;
+    let cancelled = false;
+    const id = setTimeout(() => {
+      searchRepos(token, q.split("/").at(-1)!).then(
+        (found) => !cancelled && setRemote(found),
+        () => undefined,
+      );
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(id);
+    };
+  }, [token, q]);
+
+  const filtered = useMemo(() => {
+    const local = (options ?? []).filter((r) => !q || r.name.toLowerCase().includes(q));
+    const known = new Set(local.map((r) => r.name.toLowerCase()));
+    const extra = remote.filter((r) => r.name.toLowerCase().includes(q) && !known.has(r.name.toLowerCase()));
+    return [...local, ...extra];
+  }, [options, remote, q]);
+  const manual = /^[\w.-]+\/[\w.-]+$/.test(filter.trim()) && !filtered.some((r) => r.name.toLowerCase() === q);
 
   return (
     <Card title="Repositorios" description="Qué repos vigila PR Radar. El resto se ignora.">
