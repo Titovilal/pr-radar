@@ -1,4 +1,4 @@
-import { useEffect, useState, type ButtonHTMLAttributes, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ButtonHTMLAttributes, type MouseEvent, type ReactNode } from "react";
 import {
   ArrowUpIcon,
   CheckIcon,
@@ -30,8 +30,6 @@ const DOT_TONES: Record<Tone, string> = {
   gray: "bg-zinc-400",
 };
 
-const LAST_TAB_KEY = "pr-radar:last-tab";
-
 function openUrl(url: string) {
   return (e: MouseEvent) => {
     e.preventDefault();
@@ -51,9 +49,10 @@ export function Popup() {
   const settings = useStored("settings");
   const snapshot = useStored("snapshot");
   const dismissed = useStored("dismissed") ?? {};
-  const [tab, setTab] = useState(() => localStorage.getItem(LAST_TAB_KEY) ?? "");
   const [refreshing, setRefreshing] = useState(false);
-  const [showHidden, setShowHidden] = useState(false);
+  const [showHidden, setShowHidden] = useState<Set<string>>(new Set());
+  const [current, setCurrent] = useState("");
+  const mainRef = useRef<HTMLElement>(null);
   const [, tick] = useState(0);
 
   useEffect(() => {
@@ -64,18 +63,33 @@ export function Popup() {
   if (!settings) return null;
 
   const views = settings.views;
-  const active = views.find((v) => v.id === tab) ?? views[0];
-  const result = active ? snapshot?.results[active.id] : undefined;
-  const all = inRepos(result?.items ?? [], settings.repos);
-  const visible = visibleItems(all, dismissed);
-  const hiddenCount = all.length - visible.length;
-  const shown = showHidden ? all : visible;
   const login = snapshot?.login ?? "";
+  const sections = views.map((view) => {
+    const result = snapshot?.results[view.id];
+    const all = inRepos(result?.items ?? [], settings.repos);
+    const visible = visibleItems(all, dismissed);
+    return { view, error: result?.error, all, visible };
+  });
+  const nothingAtAll = sections.every((s) => s.all.length === 0 && !s.error);
+  const currentId = current || views[0]?.id;
 
-  const selectTab = (id: string) => {
-    setTab(id);
-    setShowHidden(false);
-    localStorage.setItem(LAST_TAB_KEY, id);
+  // Scroll spy: the current section is the last one whose header has reached the top.
+  const onScroll = () => {
+    const main = mainRef.current;
+    if (!main) return;
+    let id = views[0]?.id ?? "";
+    for (const el of main.querySelectorAll<HTMLElement>("section[data-view]")) {
+      if (el.offsetTop - main.scrollTop <= 4) id = el.dataset.view!;
+    }
+    // At the bottom the last short sections can't reach the top, so highlight the last one.
+    if (main.scrollTop + main.clientHeight >= main.scrollHeight - 2) id = views.at(-1)?.id ?? id;
+    setCurrent(id);
+  };
+
+  const jumpTo = (id: string) => {
+    const main = mainRef.current;
+    const el = main?.querySelector<HTMLElement>(`section[data-view="${id}"]`);
+    if (main && el) main.scrollTo({ top: el.offsetTop });
   };
 
   const refresh = async () => {
@@ -91,90 +105,130 @@ export function Popup() {
     void save("dismissed", next);
   };
 
+  const toggleHidden = (id: string) =>
+    setShowHidden((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
   return (
-    <div className="flex max-h-[600px] w-[460px] flex-col">
-      <header className="flex items-center gap-2.5 px-4 pt-3 pb-2">
-        <img src="/icons/32.png" alt="" className="size-6" />
+    <div className="flex h-[600px] w-[460px] flex-col">
+      <header className="flex items-start gap-3 border-b border-zinc-200 px-4 pt-3 pb-2.5 dark:border-zinc-800">
         <div className="min-w-0 flex-1">
-          <h1 className="text-sm leading-tight font-semibold">PR Radar</h1>
-          <p className="truncate text-[11px] text-zinc-500">
-            {login ? `@${login} · ` : ""}
-            {snapshot?.fetchedAt ? `actualizado hace ${timeAgo(snapshot.fetchedAt)}` : "sin datos aún"}
+          <div className="flex items-center gap-2">
+            <img src="/icons/32.png" alt="" className="size-6" />
+            <h1 className="text-sm leading-tight font-semibold">PR Radar</h1>
+          </div>
+          <p className="mt-1 text-[11px] leading-snug text-zinc-500">
+            {login ? `@${login}` : ""}
             {settings.repos.length > 0 &&
               ` · ${settings.repos.length} ${settings.repos.length === 1 ? "repo" : "repos"}`}
+            <br />
+            {snapshot?.fetchedAt ? `actualizado hace ${timeAgo(snapshot.fetchedAt)}` : "sin datos aún"}
           </p>
+          <div className="mt-1.5 -ml-1.5 flex gap-0.5">
+            <IconButton label="Actualizar" onClick={refresh} disabled={refreshing}>
+              <RefreshIcon className={refreshing ? "animate-spin" : ""} />
+            </IconButton>
+            <IconButton label="Ajustes" onClick={() => chrome.runtime.openOptionsPage()}>
+              <SettingsIcon />
+            </IconButton>
+          </div>
         </div>
-        <IconButton label="Actualizar" onClick={refresh} disabled={refreshing}>
-          <RefreshIcon className={refreshing ? "animate-spin" : ""} />
-        </IconButton>
-        <IconButton label="Ajustes" onClick={() => chrome.runtime.openOptionsPage()}>
-          <SettingsIcon />
-        </IconButton>
+
+        <nav aria-label="Secciones" className="w-44 shrink-0">
+          <ul className="flex flex-col gap-px">
+            {sections.map(({ view, visible }) => {
+              const selected = view.id === currentId;
+              return (
+                <li key={view.id}>
+                  <button
+                    onClick={() => jumpTo(view.id)}
+                    aria-current={selected ? "true" : undefined}
+                    className={`flex w-full items-center gap-2 rounded-md border-l-2 px-2 py-1 text-left text-xs transition ${
+                      selected
+                        ? "border-indigo-500 bg-indigo-50 font-medium text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300"
+                        : "border-transparent text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                    }`}
+                  >
+                    <span className="flex-1 truncate">{view.name}</span>
+                    <Count n={visible.length} alert={view.badge} />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </nav>
       </header>
 
       {snapshot?.error && <ErrorBanner error={snapshot.error} />}
 
-      <nav className="mx-3 mb-1 flex gap-0.5 rounded-lg bg-zinc-100 p-0.5 dark:bg-zinc-800/80" role="tablist">
-        {views.map((view) => {
-          const count = visibleItems(snapshot?.results[view.id]?.items ?? [], dismissed, settings.repos).length;
-          const selected = view.id === active?.id;
-          return (
-            <button
-              key={view.id}
-              role="tab"
-              aria-selected={selected}
-              onClick={() => selectTab(view.id)}
-              className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium whitespace-nowrap transition ${
-                selected
-                  ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-50"
-                  : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
-              }`}
-            >
-              {view.name}
-              {count > 0 && (
-                <span
-                  className={`min-w-4 rounded-full px-1 text-[10px] leading-4 tabular-nums ${
-                    view.badge
-                      ? "bg-rose-500 text-white"
-                      : "bg-zinc-200 text-zinc-600 dark:bg-zinc-600 dark:text-zinc-200"
-                  }`}
-                >
-                  {count}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </nav>
-
-      <main className="min-h-48 flex-1 overflow-y-auto">
-        {result?.error && <p className="px-4 py-3 text-xs text-rose-600">{result.error}</p>}
-        {shown.length === 0 ? (
+      <main ref={mainRef} onScroll={onScroll} className="relative flex-1 overflow-y-auto">
+        {nothingAtAll ? (
           <Empty hasData={Boolean(snapshot?.fetchedAt) && !snapshot?.error} />
         ) : (
-          <ul className="divide-y divide-zinc-100 dark:divide-zinc-800/70">
-            {shown.map((item) => (
-              <Row
-                key={item.id}
-                item={item}
-                viewId={active!.id}
-                login={login}
-                dismissed={dismissed[item.id] === signature(item)}
-                onToggle={() => toggleDismiss(item)}
-              />
-            ))}
-          </ul>
+          sections.map(({ view, error, all, visible }) => {
+            const expanded = showHidden.has(view.id);
+            const shown = expanded ? all : visible;
+            const hiddenCount = all.length - visible.length;
+            return (
+              <section key={view.id} data-view={view.id} aria-labelledby={`h-${view.id}`}>
+                <h2
+                  id={`h-${view.id}`}
+                  className="sticky top-0 z-20 flex items-center gap-2 border-b border-zinc-200 bg-white/90 px-4 py-2 text-xs font-semibold backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90"
+                >
+                  {view.name}
+                  <Count n={visible.length} alert={view.badge} />
+                  {view.description && (
+                    <span className="truncate text-[11px] font-normal text-zinc-500">{view.description}</span>
+                  )}
+                </h2>
+                {error && <p className="px-4 py-3 text-xs text-rose-600">{error}</p>}
+                {shown.length === 0 && !error ? (
+                  <p className="px-4 py-3 text-xs text-zinc-400">Nada por aquí.</p>
+                ) : (
+                  <ul className="divide-y divide-zinc-100 dark:divide-zinc-800/70">
+                    {shown.map((item) => (
+                      <Row
+                        key={item.id}
+                        item={item}
+                        viewId={view.id}
+                        login={login}
+                        dismissed={dismissed[item.id] === signature(item)}
+                        onToggle={() => toggleDismiss(item)}
+                      />
+                    ))}
+                  </ul>
+                )}
+                {hiddenCount > 0 && (
+                  <button
+                    className="px-4 pt-1 pb-3 text-[11px] text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+                    onClick={() => toggleHidden(view.id)}
+                  >
+                    {expanded ? "Ocultar las marcadas como hechas" : `${hiddenCount} marcadas como hechas · mostrar`}
+                  </button>
+                )}
+              </section>
+            );
+          })
         )}
       </main>
-
-      {hiddenCount > 0 && (
-        <footer className="border-t border-zinc-200 px-4 py-2 text-xs text-zinc-500 dark:border-zinc-800">
-          <button className="hover:text-zinc-800 dark:hover:text-zinc-200" onClick={() => setShowHidden((s) => !s)}>
-            {showHidden ? "Ocultar las marcadas como hechas" : `${hiddenCount} marcadas como hechas · mostrar`}
-          </button>
-        </footer>
-      )}
     </div>
+  );
+}
+
+function Count({ n, alert }: { n: number; alert: boolean }) {
+  if (n === 0) return null;
+  return (
+    <span
+      className={`min-w-4 rounded-full px-1 text-center text-[10px] leading-4 font-medium tabular-nums ${
+        alert ? "bg-rose-500 text-white" : "bg-zinc-200 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-200"
+      }`}
+    >
+      {n}
+    </span>
   );
 }
 
